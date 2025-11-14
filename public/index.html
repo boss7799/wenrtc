@@ -1,0 +1,107 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>WebRTC 一键语音通话</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <style>
+    body { font-family: system-ui, sans-serif; text-align: center; padding: 2rem; background: #f0f4f8; }
+    h1 { color: #2c3e50; }
+    input, button { font-size: 1.1rem; padding: 0.7rem 1rem; margin: 0.5rem; border-radius: 8px; border: 1px solid #ccc; }
+    button { background: #3498db; color: white; cursor: pointer; }
+    button:hover { background: #2980b9; }
+    #link { width: 80%; text-align: center; }
+    #status { margin: 1rem; font-weight: bold; color: #27ae60; }
+    audio { margin: 1rem; width: 300px; }
+    #hangup { background: #e74c3c; }
+  </style>
+</head>
+<body>
+  <h1>WebRTC 语音通话</h1>
+  <div id="setup">
+    <input type="text" id="roomInput" placeholder="房间名（留空自动生成）">
+    <button id="createBtn">创建通话</button>
+  </div>
+  <div id="call" style="display:none;">
+    <p>分享链接给朋友：</p>
+    <input type="text" id="link" readonly>
+    <p id="status">等待对方加入...</p>
+    <audio id="remoteAudio" autoplay controls></audio>
+    <audio id="localAudio" autoplay muted></audio>
+    <button id="hangup">挂断</button>
+  </div>
+
+  <script src="/socket.io/socket.io.js"></script>
+  <script>
+    const socket = io();
+    const urlParams = new URLSearchParams(window.location.search);
+    const roomFromUrl = urlParams.get('room');
+    const isCreator = !roomFromUrl;
+
+    let pc, localStream, room;
+    const config = { iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] };
+    const remoteAudio = document.getElementById('remoteAudio');
+    const localAudio = document.getElementById('localAudio');
+    const status = document.getElementById('status');
+
+    async function start() {
+      localStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      localAudio.srcObject = localStream;
+    }
+
+    function createPeerConnection() {
+      pc = new RTCPeerConnection(config);
+      localStream.getTracks().forEach(track => pc.addTrack(track, localStream));
+      pc.ontrack = e => remoteAudio.srcObject = e.streams[0];
+      pc.onicecandidate = e => {
+        if (e.candidate) socket.emit('candidate', { candidate: e.candidate, room });
+      };
+    }
+
+    // 自动加入
+    if (!isCreator && roomFromUrl) {
+      document.getElementById('setup').style.display = 'none';
+      document.getElementById('call').style.display = 'block';
+      room = roomFromUrl;
+      document.getElementById('link').value = location.href;
+      start().then(() => { createPeerConnection(); socket.emit('join', room); });
+    }
+
+    // 创建房间
+    document.getElementById('createBtn').onclick = () => {
+      let input = document.getElementById('roomInput').value.trim();
+      room = input || Math.random().toString(36).substr(2, 6);
+      const link = `${location.origin}?room=${room}`;
+      document.getElementById('link').value = link;
+      document.getElementById('setup').style.display = 'none';
+      document.getElementById('call').style.display = 'block';
+      start().then(() => { createPeerConnection(); socket.emit('join', room); });
+    };
+
+    socket.on('created', () => status.textContent = '房间已创建，等待对方...');
+    socket.on('joined', () => status.textContent = '对方已加入，准备通话...');
+    socket.on('ready', async () => {
+      if (isCreator) {
+        const offer = await pc.createOffer();
+        await pc.setLocalDescription(offer);
+        socket.emit('offer', { sdp: offer, room });
+      }
+    });
+    socket.on('offer', async (data) => {
+      await pc.setRemoteDescription(new RTCSessionDescription(data.sdp));
+      const answer = await pc.createAnswer();
+      await pc.setLocalDescription(answer);
+      socket.emit('answer', { sdp: answer, room });
+    });
+    socket.on('answer', (data) => pc.setRemoteDescription(new RTCSessionDescription(data.sdp)));
+    socket.on('candidate', (data) => pc.addIceCandidate(new RTCIceCandidate(data.candidate)));
+    socket.on('full', () => alert('房间已满！'));
+
+    document.getElementById('hangup').onclick = () => {
+      pc.close();
+      localStream.getTracks().forEach(t => t.stop());
+      location.reload();
+    };
+  </script>
+</body>
+</html>public/index.html
